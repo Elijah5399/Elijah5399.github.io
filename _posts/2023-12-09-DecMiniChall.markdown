@@ -157,12 +157,12 @@ Clearly, additional noise has been added above 2048Hz and below 20Hz. In order t
 
 ```python
 from scipy.io import wavfile
-from scipy.fft import fft, fftfreq, irfft
+from scipy.fft import rfft, rfftfreq, irfft
 
 samplerate, data = wavfile.read('Task_3/C.Noisy_Voice.wav')
 N = len(data)
-yf = fft(data)
-xf = fftfreq(N, 1 / samplerate)
+yf = rfft(data)
+xf = rfftfreq(N, 1 / samplerate)
 
 # The maximum frequency is half the sample rate
 points_per_freq = len(xf) / (samplerate / 2)
