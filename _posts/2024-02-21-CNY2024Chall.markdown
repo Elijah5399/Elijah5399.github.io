@@ -1,0 +1,228 @@
+---
+layout: post
+title: "CSIT CNY 2024 Mini Challenge: Android Application Analysis"
+date: 2024-02-21 19:14:00 +1900
+author: Elijah
+categories: jekyll update
+tags: android
+---
+
+<script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML" type="text/javascript"></script>
+
+The CSIT Mini Challenge is a monthly challenge organised by CSIT, aimed to raise awareness on the various tech focus areas of CSIT. Participants earn a digital badge on completing the challenge, which they can feature on their social media platforms.
+
+## CNY Mini Challenge
+
+[This month's Mini Challenge](https://cny-2024-mini-challenge.csit-events.sg/) focuses on Android Application Analysis. Specifically, we want to analyse traffic to and from an android application (given as a `.apk` file).
+
+We are told that the Android application was made for Rabbit to send a special message to Fridaz, and that we should install the application in a rooted Android emulator or device running Android 8 or above. We should explore the application and use dynamic and/or static analysis to figure out what the special message is.
+
+You can download the `.zip` file containing the android application [here](/assets/CNY_2024_CHALL/cny_challenge.zip).
+
+We are then requested to verify the md5sum of the `.apk` file before proceeding with the challenge. It is supposed to be `532849eb9c76b9fdbbda991168295d0f`. On Mac or Linux we can do `md5 cny_challenge.apk` to find that the md5 matches.
+
+Some references provided to us include the [Android Studio Emulator setup instructions](https://developer.android.com/studio/run/managing-avds), information on SSL pinning and unpinning, an introduction to Frida, a [Medium article on Frida](https://medium.com/@pranav.s.paranjpe/introduction-to-frida-tool-b0b926ad3f59), introduction to Burp Suite, and instructions to setup the Burp Suite certificate (we will get to this later).
+
+### What is SSL Pinning?
+
+SSL Pinning is a security measure that ensures an application connects only to a specific server by verifying the server's SSL certificate or public key against a known, trusted version hard-coded in the application. It helps prevent man-in-the-middle attacks by rejecting connections to servers with unexpected certificates, even if those certificates are otherwise valid.
+
+### What is SSL Unpinning?
+
+SSL Unpinning is a method used to disable SSL Pinning. This enables analysis of an application's encrypted network traffic by allowing connections to servers regardless of their SSL certificate's match to the application's stored version.
+
+### What is Frida?
+
+Frida is a dynamic instrumentation toolkit that allows developers and security researchers to inject custom scripts into applications. This enables real-time debugging, modification, and analysis of their behavior without needing source code access.
+
+### What is Burp Suite?
+
+Burp Suite Community Edition is a free version of the Burp Suite, providing essential tools for application security testing. It includes key features for manual testing, such as intercepting proxy and basic web vulnerability scanning.
+
+## Approach
+
+I split my approach to this problem into several parts:
+
+1. Software installation
+2. Emulator setup with Burp Suite and Frida
+3. Message interception
+4. Message decryption
+
+Note that my solution was done using a Mac running Ventura 13.5.2.
+
+## 1. Software installation
+
+From the hints provided, we know that we will need Burp Suite, an emulator, `adb`, and Frida.
+
+We can download Burp Suite from [here](https://portswigger.net/burp/communitydownload). For the emulator, you can use Android Studio or other emulators. I chose to use [GenyMotion](https://www.genymotion.com/) as my emulator due to ease of use.
+
+For `adb`, instructions to install it can be found [here](https://www.xda-developers.com/install-adb-windows-macos-linux/). You should be able to execute the `adb` command from your terminal after installation.
+
+For Frida, we first need to install python packages. Enter the following in the terminal:
+
+```bash
+python -m pip install Frida
+python -m pip install objection
+python -m pip install frida-tools
+or
+pip install Frida
+pip install objection
+pip install frida-tools
+```
+
+The Medium article also tells us to install a Frida [injection script](https://codeshare.frida.re/@pcipolloni/universal-android-ssl-pinning-bypass-with-frida/) and save it as a javascript file like `frida-android-repinning.js`. We also need to download the code for a Frida server depending on which architecture our emulator is running. The GitHub link is [here](https://github.com/frida/frida/releases/). I downloaded `frida-server-16.2.1-android-arm64.tar.xz` since my emulator is using ARM64 architecture. Extract the contents of the zip file and rename it to something like `frida-server`. It should be an ELF executable file.
+
+## 2. Emulator setup with Burp Suite and Frida
+
+Open the emulator. If you are using an Android Studio emulator, ensure that it is using an OS without playstore so that we can root the device. If you are using GenyMotion, the devices are already pre-rooted. Drag the `.apk` file into the emulator to install the app on the emulator.
+
+The app should look as follows on the emulator/device:
+
+<img src = "/assets/CNY_2024_CHALL/app_init_ss.png" alt="Initial app screenshot" style="">
+
+Verify that `adb` is connected to the emulator using `adb devices` and ensuring that the device is listed there.
+
+Now, we need to ensure that our emulator recognises our Burp Suite certificate. This will allow us to intercept its messages.
+
+We want the Burp Suite certificate in `der` format. To get this, we go to Burp Suite > Proxy > Proxy Settings > Import / export CA certificate > Certificate in DER format. Save it as something like `burpcert`.
+
+To allow `frida-android-repinning.js` to work, we need to do
+
+```bash
+adb push burpcert /data/local/tmp/cert-der.crt
+```
+
+For the Burp Suite proxy to work, we also have to configure it on the device and Burp Suite. In Burp Suite > Proxy > Proxy settings, add a Proxy listener to the loopback interface with some port like `8082`. Then, on the emulator, go to Settings > Network & Internet > Internet, then click on your internet's settings and edit them. Under "advanced options", change proxy to manual, change "Proxy hostname" to your private IP address, and change "Proxy port" to `8082`. We've now configured the Burp Suite proxy.
+
+According to the CSIT challenge page, we also need to add the Burp certificate to the emulator's Trusted Certificates list by executing the code below:
+
+```bash
+## Prepare burp certificate
+openssl x509 -inform DER -in burpcert -out burp-latest.pem
+openssl x509 -inform PEM -subject_hash_old -in burp-latest.pem | head -n –1 #should produce a hash value
+mv burp-latest.pem <cert_hash>.0
+
+## Prepare emulator/device
+adb root
+adb push <cert_hash>.0 /sdcard/
+adb disable-verity
+adb reboot
+
+## Add Burp cert to emulator's trusted certificates list
+adb root
+adb shell mount -o rw,remount /sys
+adb shell
+
+# While inside emulator or device
+mkdir -m 700 /storage/emulated/0/<folder>
+cp /system/etc/security/cacerts/* /storage/emulated/0/<folder>
+mount -t tmpfs tmpfs /system/etc/security/cacerts
+mv /storage/emulated/0/<folder>/* /system/etc/security/cacerts/
+mv /sdcard/<cert_hash>.0 /system/etc/security/cacerts/<cert_hash>.0
+chown root:root /system/etc/security/cacerts/*
+chmod 644 /system/etc/security/cacerts/*
+chcon u:object_r:system_file:s0 /system/etc/security/cacerts/*
+```
+
+Do not reboot the device/emulator after this step.
+
+We also need to transfer the `frida-server` file onto the emulator, and make it executable. Open another terminal window and execute the following commands:
+
+```bash
+adb push frida-server /data/local/tmp
+adb shell chmod 777 /data/local/tmp/frida-server
+```
+
+Now we need to run frida server on the emulator:
+
+```bash
+adb shell "/data/local/tmp/frida-server &"
+
+# another method
+
+adb shell
+su
+cd /data/local/tmp/
+./frida-server &
+```
+
+This will run a frida server on the device in the background.
+
+Now we use frida to check the processes running on the emulator:
+
+```bash
+frida-ps -Uai
+```
+
+This should give us a list of all its processes, including their PIDs, names and identifiers, as shown below:
+
+<img src = "/assets/CNY_2024_CHALL/emulator_processes.png" alt="Emulator processes screenshot" style="width: 600px; height: 400px">
+
+Notice that our app has a process called "CSIT Challenge 1", and its identifier is `cny.mini.challenge.app`.
+
+## 3. Message interception
+
+Now, we use `frida-android-repinning.js`. This allows frida to bypass the SSL pinning or Root Detection during the application's runtime, and intercept network traffic. Also go to Burp Suite > Proxy > Turn intercept on.
+
+We can now do
+
+```bash
+frida -U -f cny.mini.challenge.app -l frida-android-repinning.js --no-pause
+```
+
+Observe that when we press the first button, Burp Suite intercepts the message. We obtain a HTTP/2 message with the following content:
+
+<img src = "/assets/CNY_2024_CHALL/button_1_msg.png" alt="Button 1 intercepted message" style="width: 400px; height: 200px">
+
+We can infer that it is likely we will obtain a message, which we will need to perform a rotation on to decrypt.
+
+However, now when we try to press the other buttons we get the message "Certificate pinning failure". Although the app invokes `javax.net.ssl.SSLContext.init` on the frida script, Burp Suite does not intercept any messages. This may be because Frida is not bypassing certain methods of SSL pinning.
+
+What worked for me was using a frida script which supports more SSL unpinning methods. The one I used can be found [here](https://codeshare.frida.re/@akabe1/frida-multiple-unpinning/). I saved this as `multiple_unpinning.js`.
+
+Then I run
+
+```bash
+frida -U -f cny.mini.challenge.app -l multiple_unpinning.js
+```
+
+and try pressing the buttons on the app again on my emulator.
+
+This time, all the messages are successfully sent by the app and intercepted by Burp Suite.
+
+The remaining 3 messages are:
+<img src = "/assets/CNY_2024_CHALL/button_2_msg.png" alt="Button 2 intercepted message" style="width: 400px; height: 200px">
+<img src = "/assets/CNY_2024_CHALL/button_3_msg.png" alt="Button 3 intercepted message" style="width: 400px; height: 200px">
+<img src = "/assets/CNY_2024_CHALL/button_4_msg.png" alt="Button 4 intercepted message" style="width: 400px; height: 200px">
+
+## 4. Message decryption
+
+So we now know the ciphertext, and we need to decrypt it using a Caesar's cipher. I used the following Python code to show all possible plaintexts. My script only rotates alphabets, but not numbers or special characters.
+
+```python
+c = "CSIT{U@ccL_Ce05c3e0h5_L3@e_0s_Qe@t0a}"
+
+for i in range(128):
+    flag = ""
+    for char in c:
+        if char >= 'a' and char <= 'z':
+            x = (ord(char) - ord('a') + i) % 26
+            new_char = chr(ord('a') + x)
+            flag += new_char
+        elif char >= 'A' and char <= 'Z':
+            x = (ord(char) - ord('A') + i) % 26
+            new_char = chr(ord('A') + x)
+            flag += new_char
+        else:
+            flag += char
+    print(f"flag is: {flag}")
+```
+
+Looking through all the outputs, we will see a flag that makes sense:
+<img src = "/assets/CNY_2024_CHALL/blessings.png" alt="Python code output plaintexts" style="">
+
+So we obtain our flag, which is `CSIT{H@ppY_Pr05p3r0u5_Y3@r_0f_Dr@g0n}`!
+
+## Conclusion
+
+This challenge felt a lot less guided compared to the December 2023 mini challenge, but that also helped me to learn more and improve on my troubleshooting skills. I learnt to use frida and Burp Suite better, and root android devices, intercepting its application's network traffic.
